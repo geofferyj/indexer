@@ -137,8 +137,7 @@ class ChainManager:
         Raises:
             AttributeError: If the command does not correspond to any method on the
                             instance.
-            Exception: If there is an error publishing the response to the response
-                       channel.
+            Exception: If there is an error publishing the response.
         Example message_data format:
             {
                 "command": "some_command",
