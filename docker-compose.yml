@@ -1,0 +1,29 @@
+services:
+  api: &main_app
+    build:
+      context: .
+      dockerfile: ./Dockerfile
+    image: gamic_indexer:${GAMIC_INDEXER_VERSION:-latest}
+    restart: always
+    env_file:
+      - .env
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      GAMIC_INDEXER_HOST: 0.0.0.0
+      GAMIC_INDEXER_REDIS_HOST: gamic_indexer-redis
+
+  redis:
+    image: bitnami/redis:6.2.5
+    hostname: "gamic_indexer-redis"
+    restart: always
+    environment:
+      ALLOW_EMPTY_PASSWORD: "yes"
+    healthcheck:
+      test: redis-cli ping
+      interval: 1s
+      timeout: 3s
+      retries: 50
+
+

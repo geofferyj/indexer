@@ -1,0 +1,29 @@
+services:
+  indexer-service:
+    build: .
+    container_name: blockchain-indexer-service
+    restart: always
+    environment:
+      - INDEXER_REDIS_HOST=redis
+      - INDEXER_REDIS_PORT=6379
+      - INDEXER_REDIS_DB=0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:7.0-alpine
+    container_name: blockchain-indexer-redis
+    restart: always
+    ports:
+      - "6378:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 1s
+      retries: 3
+
+volumes:
+  redis-data:
