@@ -142,7 +142,7 @@ class RPCClient:
                     if "error" in data:
                         raise Exception(f"RPC error: {data['error']}")
 
-                    await asyncio.sleep(self.max_request_interval)
+                    # await asyncio.sleep(self.max_request_interval)
                     return data["result"]
 
             except Exception as e:

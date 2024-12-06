@@ -1,29 +1,62 @@
+version: '3.9'
+
 services:
-  api: &main_app
+  indexer-service:
     build:
-      context: .
-      dockerfile: ./Dockerfile
-    image: gamic_indexer:${GAMIC_INDEXER_VERSION:-latest}
+      context: ./indexer
+      dockerfile: Dockerfile
+    container_name: blockchain-indexer-service
     restart: always
-    env_file:
-      - .env
+    environment:
+      INDEXER_REDIS_HOST: redis
+      INDEXER_REDIS_PORT: 6379
+      INDEXER_REDIS_DB: 0
     depends_on:
       redis:
         condition: service_healthy
-    environment:
-      GAMIC_INDEXER_HOST: 0.0.0.0
-      GAMIC_INDEXER_REDIS_HOST: gamic_indexer-redis
 
-  redis:
-    image: bitnami/redis:6.2.5
-    hostname: "gamic_indexer-redis"
+  consumer-service:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    container_name: indexer-consumer-service
     restart: always
     environment:
-      ALLOW_EMPTY_PASSWORD: "yes"
+      CONSUMER_REDIS_HOST: redis
+      CONSUMER_REDIS_PORT: 6379
+      CONSUMER_REDIS_DB: 0
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  manager-service:
+    build:
+      context: ./manager
+      dockerfile: Dockerfile
+    image: gamic_indexer:latest
+    restart: always
+    env_file:
+      - ./manager/.env
+    environment:
+      GAMIC_INDEXER_HOST: "0.0.0.0"
+      GAMIC_INDEXER_REDIS_HOST: "redis"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  redis:
+    image: redis:8.0-M02-bookworm
+    container_name: blockchain-indexer-redis
+    restart: always
+    ports:
+      - "6378:6379"
+    volumes:
+      - redis-data:/data
     healthcheck:
-      test: redis-cli ping
-      interval: 1s
-      timeout: 3s
-      retries: 50
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 1s
+      retries: 3
 
-
+volumes:
+  redis-data:
