@@ -1,25 +1,46 @@
 # service/main.py
 import asyncio
 
-from loguru import logger
+from redis.asyncio import Redis
 
-from consumer.consumer.consumer import Consumer
+from consumer.config import settings
+from consumer.consumer import Consumer
+from consumer.utils.redis import RedisKeys
 
 
-async def main():
-    consumer = Consumer(
-        redis_host="localhost",
-        redis_port=6379,
-        stream_name="mystream",
-        group_name="mygroup",
-        consumer_name="consumer1",
-        block_timeout_ms=2000,
-        count=10,
-        trim_len=10000,          # Adjust if you want a different max length
-        delete_after_ack=True    # Set to False if you want to keep the history
-    )
+async def main() -> None:
+    """
+    Main entry point for running multiple consumers concurrently.
 
-    await consumer.run()
+    This function initializes a Redis connection and creates a specified number
+    of consumer instances, each with a unique consumer name. It then runs all
+    consumers concurrently using asyncio.
+
+    Args:
+        None
+
+    Returns:
+        None
+
+    Raises:
+        Any exceptions raised by the consumers will propagate.
+    """
+
+    redis = Redis.from_url(str(settings.redis_url), decode_responses=True)
+
+    consumers = []
+    for i in range(settings.worker_count):
+        c = Consumer(
+            redis=redis,
+            stream_name=RedisKeys.stream_key,
+            group_name=settings.group_name,
+            consumer_name=f"consumer_{i}",
+            webhook_url=settings.webhook_url,
+        )
+        consumers.append(asyncio.create_task(c.run()))
+
+    await asyncio.gather(*consumers)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

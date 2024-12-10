@@ -21,12 +21,12 @@ command = {
 add_chain = {
     "command": "add_chain",
     "data": {
-        "chain_id": 1,
-        "rpc_endpoint": "https://snowy-alpha-pine.quiknode.pro/7a05c5b4b5b47af309f10304f5d383e84ce39916",
-        "block_time": 12,
-        "start_block": 21325616,
+        "chain_id": 56,
+        "rpc_endpoint": "https://snowy-alpha-pine.bsc.quiknode.pro/7a05c5b4b5b47af309f10304f5d383e84ce39916",
+        "block_time": 3,
+        "start_block": 44643128
     },
-    "response_channel": "indexer:response",
+    "response_channel": "indexer:response"
 }
 
 remove_chain = {

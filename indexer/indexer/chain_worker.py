@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from loguru import logger
 from redis.asyncio import Redis
@@ -41,9 +41,7 @@ class ChainWorker:
         self.config = config
         self.rpc_client = RPCClient(config.rpc_endpoint, config.chain_id)
         self.redis = redis
-        self.last_processed_block = config.start_block
         self.last_queued_block = config.start_block
-        self.latest_block: Optional[int] = None
         self.sub_workers: List[asyncio.Task] = []
         self.max_sub_workers = 10
         self.block_queue: asyncio.Queue[int] = asyncio.Queue(
@@ -67,15 +65,12 @@ class ChainWorker:
         Returns:
             None
         """
-        self.latest_block = await self.rpc_client.get_latest_block_number()
-        logger.info(f"Latest block at startup: {self.latest_block}")
-
         _ = asyncio.create_task(self.dispatch_blocks())  # noqa: RUF006
         for id in range(self.max_sub_workers):
             worker = asyncio.create_task(self.sub_worker(id))
             self.sub_workers.append(worker)
 
-    async def update_config(self) -> None:
+    async def update_config(self, block: int) -> None:
         """
         Asynchronously saves the last processed block number to Redis.
 
@@ -87,7 +82,7 @@ class ChainWorker:
             None
         """
         config = self.config
-        config.start_block = self.last_processed_block
+        config.start_block = block
         await self.redis.set(
             RedisKeys.chain_config(self.chain_id),
             config.model_dump_json(),
@@ -113,23 +108,18 @@ class ChainWorker:
         """
         while not self.stop_event.is_set():
             logger.info(f"Dispatching blocks for chain {self.chain_id}")
-            logger.info(f"Last processed block: {self.last_processed_block}")
-            logger.info(f"Latest block: {self.latest_block}")
             try:
-                # Only fetch the latest block if we're caught up
-                if self.latest_block is None or self.last_processed_block >= self.latest_block:  # noqa: E501
-                    self.latest_block = await self.rpc_client.get_latest_block_number()
-                    logger.info(f"Fetched Latest block: {self.latest_block}")
 
-                # Only add blocks that are greater than the highest we've ever queued
-                new_start = max(self.last_queued_block + 1,
-                                self.last_processed_block + 1)
-                if new_start <= self.latest_block:
-                    logger.info(
-                        f"Adding blocks from {new_start} to {self.latest_block}")
-                    for block_number in range(new_start, self.latest_block + 1):
-                        await self.block_queue.put(block_number)
-                    self.last_queued_block = self.latest_block
+                latest_block = await self.rpc_client.get_latest_block_number()
+                logger.info(f"Fetched Latest block: {latest_block}")
+
+                logger.info(
+                    f"Adding {latest_block - self.last_queued_block} blocks from {self.last_queued_block} to {latest_block+1}")
+
+                for block_number in range(self.last_queued_block+1, latest_block + 1):
+                    await self.block_queue.put(block_number)
+
+                self.last_queued_block = latest_block
 
                 logger.info(f"Queue size: {self.block_queue.qsize()}")
 
@@ -164,8 +154,7 @@ class ChainWorker:
                 await self.process_block(block_number, id)
                 self.block_queue.task_done()
                 logger.info(f"{worker_id} processed: {block_number}")
-                self.last_processed_block = block_number
-                await self.update_config()
+                await self.update_config(block_number)
 
             except asyncio.CancelledError:
                 break
@@ -189,18 +178,21 @@ class ChainWorker:
 
         worker_id = f"Worker {self.chain_id}-{id}"
 
-        transactions = await self.rpc_client.get_block_transactions(block_number)
+        transactions, timestamp = await self._get_transactions(block_number)
 
         receipts = await self.rpc_client.get_block_receipts(block_number)
 
         transactions_dict = {tx["hash"]: tx for tx in transactions}
 
-        receipts_dict = {receipt["transactionHash"]
-            : receipt for receipt in receipts}
+        receipts_dict = {
+            receipt["transactionHash"]: receipt
+            for receipt in receipts
+        }
 
-        merged_transactions = self.merge_transactions_receipts(
+        merged_transactions = self._merge_transactions_receipts(
             transactions_dict,
             receipts_dict,
+            timestamp,
         )
 
         # add each transaction in merged_transactions to redis stream
@@ -210,13 +202,19 @@ class ChainWorker:
 
                 await self.redis.xadd(
                     RedisKeys.stream_key,
-                    {"tx": tx_dump},  # type: ignore
+                    {"tx": tx_dump},
                 )
             except Exception as exc:
                 logger.error(
                     f"{worker_id} error adding transaction to stream: {exc}")
 
-    async def _get_transactions(self, block_number: int) -> List[Dict[str, Any]]:
+        await self.redis.rpush(
+            RedisKeys.processed_blocks, block_number)  # type: ignore[misc]
+
+    async def _get_transactions(
+            self,
+            block_number: int,
+    ) -> Tuple[List[Dict[str, Any]], int]:
         """
         Asynchronously retrieves transactions for a given block number.
 
@@ -231,12 +229,13 @@ class ChainWorker:
             block_number,
             full_transactions=True,
         )
-        return block.get("transactions", [])
+        return block.get("transactions", []), block.get("timestamp", 0)
 
-    def merge_transactions_receipts(
+    def _merge_transactions_receipts(
         self,
         txs: Dict[str, Dict[str, Any]],
         receipts: Dict[str, Dict[str, Any]],
+        timestamp: int,
     ) -> List[Transaction]:
         """
         Merges transaction data with their corresponding receipts and adds the chain ID.
@@ -255,7 +254,10 @@ class ChainWorker:
         """
         # logger.info("Merging transactions and receipts")
         merged_txs = [
-            txs[hsh] | receipts[hsh] | {"chainId": hex(self.chain_id)} for hsh in txs
+            txs[hsh]
+            | receipts[hsh]
+            | {"chainId": hex(self.chain_id)}
+            | {"timestamp": timestamp} for hsh in txs
         ]
         # logger.info("Merged transactions and receipts")
 
@@ -265,8 +267,7 @@ class ChainWorker:
             try:
                 validated_tx.append(Transaction.model_validate(tx))
             except Exception as exc:
-                _hash: Optional[str] = tx.get(
-                    "hash") or tx.get("transactionHash")
+                _hash = tx.get("hash") or tx.get("transactionHash")
 
                 logger.error(f"Error validating transaction:  {_hash}: {exc}")
                 # logger.error(f"Erroneous transaction merged: {tx}")
@@ -294,4 +295,3 @@ class ChainWorker:
             worker.cancel()
         await asyncio.gather(*self.sub_workers, return_exceptions=True)
         await self.rpc_client.close()
-        await self.update_config()

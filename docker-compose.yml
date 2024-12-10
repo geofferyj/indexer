@@ -1,40 +1,40 @@
-version: '3.9'
-
 services:
-  indexer-service:
-    build:
-      context: ./indexer
-      dockerfile: Dockerfile
-    container_name: blockchain-indexer-service
-    restart: always
-    environment:
-      INDEXER_REDIS_HOST: redis
-      INDEXER_REDIS_PORT: 6379
-      INDEXER_REDIS_DB: 0
-    depends_on:
-      redis:
-        condition: service_healthy
+  # indexer-service:
+  #   build:
+  #     context: ./indexer
+  #     dockerfile: Dockerfile
+  #   container_name: indexer-service
+  #   restart: always
+  #   environment:
+  #     INDEXER_REDIS_HOST: redis
+  #     INDEXER_REDIS_PORT: 6379
+  #     INDEXER_REDIS_DB: 0
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
 
-  consumer-service:
-    build:
-      context: ./consumer
-      dockerfile: Dockerfile
-    container_name: indexer-consumer-service
-    restart: always
-    environment:
-      CONSUMER_REDIS_HOST: redis
-      CONSUMER_REDIS_PORT: 6379
-      CONSUMER_REDIS_DB: 0
-    depends_on:
-      redis:
-        condition: service_healthy
+  # consumer-service:
+  #   build:
+  #     context: ./consumer
+  #     dockerfile: Dockerfile
+  #   container_name: indexer-consumer-service
+  #   restart: always
+  #   environment:
+  #     CONSUMER_REDIS_HOST: redis
+  #     CONSUMER_REDIS_PORT: 6379
+  #     CONSUMER_REDIS_DB: 0
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
 
   manager-service:
     build:
       context: ./manager
       dockerfile: Dockerfile
-    image: gamic_indexer:latest
+    image: indexer-manager-service
     restart: always
+    ports:
+      - "8000:8000"
     env_file:
       - ./manager/.env
     environment:
@@ -46,7 +46,7 @@ services:
 
   redis:
     image: redis:8.0-M02-bookworm
-    container_name: blockchain-indexer-redis
+    container_name: indexer-redis
     restart: always
     ports:
       - "6378:6379"

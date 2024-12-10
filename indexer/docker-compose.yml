@@ -1,7 +1,7 @@
 services:
   indexer-service:
     build: .
-    container_name: blockchain-indexer-service
+    container_name: indexer-service
     restart: always
     environment:
       - INDEXER_REDIS_HOST=redis
@@ -13,7 +13,7 @@ services:
 
   redis:
     image: redis:7.0-alpine
-    container_name: blockchain-indexer-redis
+    container_name: indexer-redis
     restart: always
     ports:
       - "6378:6379"

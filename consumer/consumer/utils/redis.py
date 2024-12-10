@@ -1,4 +1,4 @@
-from indexer.config import settings
+from consumer.config import settings
 
 
 class RedisKeys:

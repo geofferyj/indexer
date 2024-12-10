@@ -5,9 +5,12 @@ from yarl import URL
 
 
 class Settings(BaseSettings):
-    """Settings configuration class for the indexer service."""
+    """Settings configuration class for the Consumer service."""
 
     app_name: str = "indexer"
+    group_name: str = "consumer-group"
+    webhook_url: str = ""
+    worker_count: int = 4
 
     # Redis Configuration
     redis_host: str = "localhost"

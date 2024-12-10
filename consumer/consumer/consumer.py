@@ -1,103 +1,204 @@
 import asyncio
-import logging
 from typing import Any, Dict
 
-import redis.asyncio as aioredis
+import aiohttp
+from loguru import logger
+from redis.asyncio import Redis
+from redis.exceptions import ResponseError
 
-logging.basicConfig(level=logging.INFO)
+from consumer.models import Transaction
+from consumer.utils.redis import RedisKeys
+
 
 class Consumer:
+    """
+    Consumer class for reading and processing messages from a Redis stream.
+
+    Attributes:
+        block_timeout_ms (int): Max time (ms) to block waiting for messages.
+        count (int): Max number of messages to read at once.
+        session (aiohttp.ClientSession): HTTP session for sending webhooks.
+        redis (Redis): Redis client instance.
+    Methods:
+        _ensure_consumer_group():
+        _send_webhook(data):
+        _should_ignore_transaction(tx):
+        _process_message(message_id, data):
+        run():
+    """
+
     def __init__(
         self,
-        redis_host: str = "localhost",
-        redis_port: int = 6379,
-        stream_name: str = "mystream",
-        group_name: str = "mygroup",
-        consumer_name: str = "consumer1",
+        redis: Redis,
+        stream_name: str,
+        group_name: str,
+        consumer_name: str,
+        webhook_url: str,
         block_timeout_ms: int = 2000,
         count: int = 10,
-        trim_len: int = 10000,
-        delete_after_ack: bool = True,
-    ):
+    ) -> None:
+        """
+        Initialize the consumer with the given parameters.
+
+        Args:
+            redis_url (str): Redis server URL.
+            stream_name (str): Name of the Redis stream to consume from.
+            group_name (str): Name of the Redis consumer group.
+            consumer_name (str): Name of this consumer.
+            webhook_url (str): The URL to send transaction data to.
+            block_timeout_ms (int, optional): Max time (ms) to block waiting for msgs.
+            count (int, optional): Max number of messages to read at once.
+        """
+        self.redis = redis
         self.stream_name = stream_name
         self.group_name = group_name
         self.consumer_name = consumer_name
+        self.webhook_url = webhook_url
         self.block_timeout_ms = block_timeout_ms
         self.count = count
-        self.trim_len = trim_len
-        self.delete_after_ack = delete_after_ack
+        self.idle_ms = 10000
 
-        # Connect to Redis
-        self.redis = aioredis.Redis(host=redis_host, port=redis_port, decode_responses=True)
+        self.session = aiohttp.ClientSession()
 
-    async def _ensure_consumer_group(self):
-        # Create a consumer group if it doesn't exist.
-        # MKSTREAM ensures the stream is created if it doesn't exist yet.
+    async def _ensure_consumer_group(self) -> None:
+        """
+        Ensures that the consumer group exists for the specified stream.
+
+        This method attempts to create a consumer group for the given stream name.
+        If the group already exists, it ignores the "BUSYGROUP" error. Any other
+        errors are raised.
+        Raises:
+            ResponseError: If an error occurs while creating the consumer group,
+                        except for "BUSYGROUP" errors.
+        """
+
         try:
-            await self.redis.xgroup_create(self.stream_name, self.group_name, id='0', mkstream=True)
-            logging.info(f"Consumer group '{self.group_name}' created on stream '{self.stream_name}'")
-        except aioredis.exceptions.ResponseError as e:
-            # This happens if the group already exists - ignore this error
-            if "BUSYGROUP" in str(e):
-                logging.info(f"Consumer group '{self.group_name}' already exists.")
-            else:
+            await self.redis.xgroup_create(
+                self.stream_name, self.group_name, id="0", mkstream=True,
+            )
+        except ResponseError as e:
+            # Ignore "BUSYGROUP" errors, which indicate the group already exists.
+            if "BUSYGROUP" not in str(e):
                 raise e
 
-    async def process(self, message_id: str, data: Dict[str, Any]) -> None:
+    async def _send_webhook(self, data: Dict[str, Any]) -> None:
+        """
+        Send webhook with the given data to the specified webhook URL.
+
+        Args:
+            data (dict): The transaction data to send.
+        """
+        try:
+            async with self.session.post(self.webhook_url, json=data) as response:
+                logger.info(
+                    f"{self.consumer_name}: Webhook response status: {response.status}")
+        except Exception as e:
+            logger.error(f"{self.consumer_name}: Error sending webhook: {e}")
+
+    async def _process_message(self, message_id: str, data: Dict[str, Any]) -> None:
         """
         Process a single message from the stream.
 
-        message_id: str - The Redis stream message ID.
-        data: dict     - The message content (field-value pairs).
+        For simplicity:
+        - Extract 'tx' field from data and validate as a Transaction.
+        - Check if it should be ignored.
+        - If not ignored, send it to the webhook.
+        - Acknowledge and delete from Redis.
 
-        This method should be overridden or expanded to handle your message logic.
+        Args:
+            message_id (str): The ID of the Redis stream message.
+            data (dict): The message fields.
         """
-        logging.info(f"Processing message_id={message_id}, data={data}")
-        # ... your async business logic here ...
-        # For example, decode the transaction, process it, update your database, etc.
-        await asyncio.sleep(0.1)  # Simulate async processing
+        try:
+            tx = Transaction.model_validate_json(data["tx"])
+        except Exception as e:
+            logger.error(
+                f"{self.consumer_name}: Error validating transaction: {e}")
 
-    async def run(self):
+            logger.info(f"{self.consumer_name}: error in tx: {data}")
+            await self.redis.xack(self.stream_name, self.group_name, message_id)
+            await self.redis.xdel(self.stream_name, message_id)
+            return
+
+        # If not ignored, send to the webhook
+        await self._send_webhook(tx.model_dump(mode="json"))
+
+        # Acknowledge and delete the message after processing
+        await self.redis.xack(self.stream_name, self.group_name, message_id)
+        await self.redis.xdel(self.stream_name, message_id)
+
+    async def _reclaim_pending_messages(self) -> None:
         """
-        Continuously poll the Redis stream for new messages, process them, acknowledge,
-        and optionally delete them. If needed, also trim the stream to prevent it from
-        growing indefinitely.
+        Reclaim pending messages that have been idle longer than `self.idle_ms`.
+
+        Uses XAUTOCLAIM to claim pending messages back to the current consumer after
+        they've been idle, and reprocesses them to ensure they are not stuck pending
+        indefinitely.
+        """
+        # XAUTOCLAIM returns messages along with a new start ID for subsequent calls.
+        start_id = "0-0"
+        while True:
+            # XAUTOCLAIM: Returns a tuple: (new_start_id, [ (message_id, {fields}),...])
+            result = await self.redis.xautoclaim(
+                self.stream_name,
+                self.group_name,
+                self.consumer_name,
+                min_idle_time=self.idle_ms,
+                start_id=start_id,
+                count=self.count,
+            )
+            if not result:
+                break
+
+            new_start_id, messages = result[0], result[1]
+            if not messages:
+                break
+
+            # Process each reclaimed message
+            for message_id, msg_data in messages:
+                await self._process_message(message_id, msg_data)
+
+            # Update start_id for the next iteration in case there are more pending msgs
+            start_id = new_start_id
+
+    async def run(self) -> None:
+        """
+        Continuously read and process messages from the Redis stream.
+
+        Steps:
+        - Ensure consumer group exists.
+        - Use XREADGROUP to read new messages.
+        - Process each message.
+        - If no messages, wait briefly and retry.
         """
         await self._ensure_consumer_group()
-        logging.info("Starting consumer loop...")
-        while True:
-            # Read messages via XREADGROUP
-            # '>' means read only messages that were never delivered to another consumer in this group.
-            messages = await self.redis.xreadgroup(
-                groupname=self.group_name,
-                consumername=self.consumer_name,
-                streams={self.stream_name: '>'},
-                count=self.count,
-                block=self.block_timeout_ms
-            )
 
-            if not messages:
-                # No new messages
-                await asyncio.sleep(1)
-                continue
+        logger.info(f"{self.consumer_name} started consuming...")
 
-            for (stream, msg_list) in messages:
-                for message_id, data in msg_list:
-                    try:
-                        # Process the message
-                        await self.process(message_id, data)
-                        # Acknowledge the message so it's not considered pending
-                        await self.redis.xack(self.stream_name, self.group_name, message_id)
+        try:
+            while True:
+                await self._reclaim_pending_messages()
 
-                        # Optionally delete the message from the stream
-                        if self.delete_after_ack:
-                            await self.redis.xdel(self.stream_name, message_id)
-                    except Exception as e:
-                        # If processing fails, don't ack or delete the message.
-                        # It will remain pending, and can be retried or claimed by another consumer.
-                        logging.error(f"Error processing message {message_id}: {e}", exc_info=True)
+                messages = await self.redis.xreadgroup(
+                    groupname=self.group_name,
+                    consumername=self.consumer_name,
+                    streams={self.stream_name: ">"},
+                    count=self.count,
+                    block=self.block_timeout_ms,
+                )
 
-            # Optionally trim the stream to keep it manageable
-            # This removes older messages, retaining only the last `trim_len` entries
-            if self.trim_len > 0:
-                await self.redis.xtrim(self.stream_name, maxlen=self.trim_len, approximate=True)
+                if not messages:
+                    # No new messages, wait a bit.
+                    await asyncio.sleep(1)
+                    continue
+
+                for _, msg_list in messages:
+                    for message_id, msg_data in msg_list:
+                        await self._process_message(message_id, msg_data)
+
+        except asyncio.CancelledError:
+            logger.error(f"{self.consumer_name} consumer loop cancelled.")
+        except Exception as e:
+            logger.error(f"{self.consumer_name} consumer loop error: {e}")
+        finally:
+            await self.session.close()

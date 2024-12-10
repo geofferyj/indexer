@@ -20,6 +20,7 @@ class RedisKeys:
     APP_NAME = settings.app_name
     stream_key = f"{APP_NAME}:transactions"
     chains = f"{APP_NAME}:chains"
+    processed_blocks = f"{APP_NAME}:processed_blocks"
 
     @staticmethod
     def last_block(chain_id: int) -> str:

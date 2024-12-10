@@ -1,5 +1,5 @@
 # service/models.py
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, computed_field
 
@@ -60,12 +60,12 @@ class LogEntry(BaseModel):
     address: str
     topics: List[str]
     data: str
-    # disable block_number: HexInt = Field(alias="blockNumber")
+    block_number: HexInt = Field(alias="blockNumber")
     transaction_hash: str = Field(alias="transactionHash")
-    # disable transaction_index: HexInt = Field(alias="transactionIndex")
-    # disable block_hash: str = Field(alias="blockHash")
-    # disable log_index: HexInt = Field(alias="logIndex")
-    # disable removed: bool
+    transaction_index: HexInt = Field(alias="transactionIndex")
+    block_hash: str = Field(alias="blockHash")
+    log_index: HexInt = Field(alias="logIndex")
+    removed: bool
 
     @computed_field  # type: ignore[misc]
     @property
@@ -114,6 +114,7 @@ class Transaction(BaseModel):
     gas: HexInt
     gas_price: HexInt = Field(alias="gasPrice")
     input: str
+    decoded_input: Dict[str, Any] = {}  # Decoded input data
     nonce: HexInt
     to: Optional[str]
     # disable transaction_index: HexInt = Field(alias="transactionIndex")
@@ -136,3 +137,4 @@ class Transaction(BaseModel):
     logs: List[LogEntry]
     # disable logs_bloom: str = Field(alias="logsBloom")
     status: HexInt
+    timestamp: HexInt
