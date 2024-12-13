@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 
 from indexer.config import settings
+from indexer.utils.decorators import log_execution
 
 
 class RPCClient:
@@ -160,6 +161,69 @@ class RPCClient:
 
         raise Exception("Max retries exceeded")
 
+    @log_execution()
+    async def _batch_call(
+        self,
+        payloads: List[Dict[str, Any]],
+        retries: int = settings.max_rpc_retries,
+        backoff_factor: float = settings.rpc_backoff_factor,
+    ) -> Any:
+        """
+        Perform a batch RPC call with retries and exponential backoff.
+
+        Args:
+            payloads (List[Dict[str, Any]]): A list of payloads to be sent in the batch
+                                             RPC call.
+            retries (int, optional): The maximum number of retry attempts. Defaults to
+                                     `settings.max_rpc_retries`.
+            backoff_factor (float, optional): The factor by which the delay between
+                                            retries is multiplied. Defaults to
+                                            `settings.rpc_backoff_factor`.
+        Returns:
+            Any: The results of the RPC calls.
+        Raises:
+            Exception: If the RPC call fails after the maximum number of retries.
+        """
+
+        attempt = 0
+
+        while attempt < retries:
+            request_ids = []
+            for payload in payloads:
+                request_id = await self._generate_request_id(payload["method"])
+                payload["id"] = request_id
+                request_ids.append(request_id)
+            try:
+                async with self.rate_limiter, self.session.post(
+                    self.rpc_endpoint,
+                    json=payloads,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as response:
+
+                    # Check for HTTP errors
+                    if response.status != 200:
+                        raise Exception("RPC call failed with status")
+
+                    data = await response.json()
+
+                    # await asyncio.sleep(self.max_request_interval)
+                    return [datum["result"] for datum in data]
+
+            except Exception as e:
+                attempt += 1
+
+                if attempt >= retries:
+                    raise e
+
+                # Exponential backoff
+                delay = backoff_factor * (2**attempt)
+                await asyncio.sleep(delay)
+            finally:
+                # Cleanup after each attempt
+                await self._remove_request_id(request_id)
+
+        raise Exception("Max retries exceeded")
+
     async def get_block_by_number(
         self,
         block_number: int,
@@ -182,6 +246,35 @@ class RPCClient:
             "eth_getBlockByNumber",
             [hex_block, full_transactions],
         )
+
+    async def get_block_by_number_batch(
+        self,
+        start_block: int,
+        end_block: int,
+        full_transactions: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """
+        Fetches a batch of blocks by their numbers.
+
+        Args:
+            start_block (int): The starting block number.
+            end_block (int): The ending block number.
+            full_transactions (bool): If True, returns full transaction objects;
+                                      if False, returns only transaction hashes.
+                                      Defaults to True.
+
+        Returns:
+            Dict[str, Any]: A dictionary containing the block data.
+        """
+
+        payloads = [
+            {
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockByNumber",
+                "params": [hex(block_number), full_transactions],
+            } for block_number in range(start_block, end_block + 1)
+        ]
+        return await self._batch_call(payloads)
 
     async def get_block_transactions(self, block_number: int) -> List[Dict[str, Any]]:
         """
@@ -210,6 +303,31 @@ class RPCClient:
         """
         hex_block = hex(block_number)
         return await self._call("eth_getBlockReceipts", [hex_block])
+
+    async def get_block_receipts_batch(
+            self,
+            start_block: int,
+            end_block: int,
+    ) -> List[List[Dict[str, Any]]]:
+        """
+        Fetches block receipts for a range of blocks from start_block to end_block.
+
+        Args:
+            start_block (int): The starting block number.
+            end_block (int): The ending block number.
+
+        Returns:
+            List[Dict[str, Any]]: A list of dictionaries containing the block receipts.
+        """
+
+        payloads = [
+            {
+                "jsonrpc": "2.0",
+                "method": "eth_getBlockReceipts",
+                "params": [hex(block_number)],
+            } for block_number in range(start_block, end_block + 1)
+        ]
+        return await self._batch_call(payloads)
 
     async def get_latest_block_number(self) -> int:
         """
