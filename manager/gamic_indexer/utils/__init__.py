@@ -1,0 +1,1 @@
+"""gamic_indexer package."""

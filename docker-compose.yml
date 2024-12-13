@@ -1,17 +1,17 @@
 services:
-  indexer-service:
-    build:
-      context: ./indexer
-      dockerfile: Dockerfile
-    container_name: indexer-service
-    restart: always
-    environment:
-      INDEXER_REDIS_HOST: redis
-      INDEXER_REDIS_PORT: 6379
-      INDEXER_REDIS_DB: 0
-    depends_on:
-      redis:
-        condition: service_healthy
+  # indexer-service:
+  #   build:
+  #     context: ./indexer
+  #     dockerfile: Dockerfile
+  #   container_name: indexer-service
+  #   restart: always
+  #   environment:
+  #     INDEXER_REDIS_HOST: redis
+  #     INDEXER_REDIS_PORT: 6379
+  #     INDEXER_REDIS_DB: 0
+  #   depends_on:
+  #     redis:
+  #       condition: service_healthy
 
   # consumer-service:
   #   build:

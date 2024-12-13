@@ -55,6 +55,9 @@ class Settings(BaseSettings):
     sentry_dsn: Optional[str] = None
     sentry_sample_rate: float = 1.0
 
+    command_channel: str = "indexer:commands"
+    response_channel_prefix: str = "indexer:responses:"
+
     @property
     def redis_url(self) -> URL:
         """
